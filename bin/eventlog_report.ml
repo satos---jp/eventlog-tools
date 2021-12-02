@@ -61,7 +61,7 @@ type t = {
   mutable flushs : int list;
 }
          
-let read_event { Eventlog.payload; timestamp; _ } ({ allocs; events; counters; _ } as t) =
+let _read_event { Eventlog.payload; timestamp; _ } ({ allocs; events; counters; _ } as t) =
   match payload with 
   | Alloc { bucket; count; } -> begin
     match Hashtbl.find_opt allocs bucket with
@@ -193,6 +193,53 @@ let load_file path =
   >>= Bos.OS.File.read
   >>= fun content ->
   Ok (Bigstringaf.of_string ~off:0 ~len:(String.length content) content)
+
+
+let ns2str t =
+  let ms = t / 1000 / 1000 in
+  let s = ms / 1000 in
+  let ms = ms mod 1000 in
+  let m = s / 60 in
+  let s = s mod 60 in
+  let h = m / 60 in
+  let m = m mod 60 in
+  Printf.sprintf "%02d:%02d:%02d.%03d" h m s ms
+
+let is_first_event = ref true
+let last_event : (string,int) Hashtbl.t = Hashtbl.create 100
+let read_event (ev:Eventlog.event) _ =
+  match ev.payload with
+  | Entry {phase} | Exit {phase} ->
+      let typestr = match ev.payload with Entry _ -> "entry" | _ -> "exit" in
+      let phases = Eventlog.string_of_phase phase in
+      let dump () =
+        (* "22:43:47.977" *)
+        let basems = ((22 * 60 + 43) * 60 + 47) * 1000 + 977 in
+        let to_time = basems * 1000 * 1000 + ev.timestamp in
+        let s = ns2str to_time in
+        (*
+        Printf.printf "%23s %5s : %d [ns] | %s\n" phases typestr ev.timestamp s;
+        *)
+        (if typestr = "entry" then
+          Hashtbl.add last_event phases ev.timestamp
+         else begin
+          let v = ev.timestamp - Hashtbl.find last_event phases in
+          if v > 1000 * 1000 * 100 then
+            Printf.printf "long event %25s took %s @ %s\n" phases (ns2str v) s
+         end)
+      in
+      begin match phases with
+      | "compact/main"
+      | "compact/recompact"
+      | "explicit/gc_compact"
+      | "major/check_and_compact" ->
+          dump ()
+      | _ when !is_first_event ->
+          is_first_event := false;
+          dump()
+      | _ -> dump ()
+      end
+  | _ -> ()
 
 let main in_file =
   let module P = Eventlog.Parser in
